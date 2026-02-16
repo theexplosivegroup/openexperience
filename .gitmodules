@@ -1,0 +1,3 @@
+[submodule "radiant-sales-expert"]
+	path = radiant-sales-expert
+	url = https://github.com/dylanmeyford/radiant-sales-expert.git
