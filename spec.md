@@ -210,8 +210,42 @@ requires:
   schemas: string[]             # Data shapes this function expects (subset of manifest requires.schemas)
   knowledge: string[]           # Knowledge files this function references (by name, without .md)
   functions: string[]           # Other functions this function may call (by name)
+
+# -- Context declarations (optional) --
+context:
+  - name: string                # Variable name (used as {{name}} in the body)
+    description: string         # What this data represents
+    schema: string              # Schema reference (append [] for arrays, e.g. "contact[]")
+    source:                     # Where to fetch this data
+      tool: string              #   Which tool to call
+      operation: string         #   Which operation on that tool
+      params:                   #   Parameters to pass -- values can reference:
+                                #     $input.<field>          -- from the function's input
+                                #     $context.<name>         -- from a previously resolved context item
+                                #     $context.<name>[*].field -- array field projection
+        <param>: <value>
 ---
 ```
+
+### Context Resolution
+
+Functions can declare data dependencies via the `context` field. The framework resolves these **before** calling the function:
+
+1. The framework reads the `context` declarations in order
+2. For each item, it calls the specified `tool.operation` with the mapped `params`
+3. Items can depend on previously resolved items (via `$context.<name>`)
+4. The resolved data is injected into the function body wherever `{{name}}` template variables appear
+
+**Resolution order**: Context items are resolved top-to-bottom. An item can reference any item declared above it via `$context.<name>`. Frameworks may parallelize items that have no interdependencies.
+
+**Param references**:
+
+| Reference | Meaning |
+|---|---|
+| `$input.<field>` | From the function's input (passed by a process step or direct call) |
+| `$context.<name>` | A previously resolved context item (the full object) |
+| `$context.<name>[*].field` | Project a single field from each item in an array context |
+| Literal values | Static strings, numbers, booleans |
 
 ### Body
 
@@ -222,13 +256,119 @@ The body should:
 - Be cleaned of framework-specific references (no imports, no TypeScript, no Zod)
 - Replace product-specific references with generic placeholders (e.g., "your product/service")
 - Preserve the full depth of the original expertise -- do not summarize
+- Use `{{variable_name}}` template variables to reference data from context declarations
+
+### Template Variables
+
+Template variables use double curly braces: `{{name}}`. They are replaced with the resolved context data before the prompt is sent to the LLM.
+
+The framework is responsible for serializing the data into a readable format (e.g., JSON, XML tags, markdown tables) appropriate for the model. The function body can provide formatting hints by wrapping variables in markup:
+
+```markdown
+## Current Deal
+{{opportunity}}
+
+## Stakeholders
+{{contacts}}
+```
+
+Functions that don't need pre-fetched data (e.g., they receive everything via direct input) can omit the `context` field entirely and won't use template variables.
 
 ### Example
 
 ```markdown
 ---
+name: next-best-action
+description: Decide the optimal next steps to advance a deal
+model: gpt-5
+reasoning: high
+input: An opportunity ID and optional evaluation trigger
+output: Ranked list of recommended actions with reasoning, type, and priority
+tools: [crm, calendar]
+requires:
+  schemas: [opportunity, contact, activity]
+  knowledge: [sales-methodologies, sales-process]
+  functions: [compose-content]
+context:
+  - name: opportunity
+    description: The deal being analyzed
+    schema: opportunity
+    source:
+      tool: crm
+      operation: fetch_opportunity
+      params:
+        opportunity_id: $input.opportunity_id
+
+  - name: contacts
+    description: All contacts on the deal with engagement intelligence
+    schema: contact[]
+    source:
+      tool: crm
+      operation: fetch_contacts
+      params:
+        opportunity_id: $input.opportunity_id
+
+  - name: recent_activities
+    description: Recent communications and interactions
+    schema: activity[]
+    source:
+      tool: crm
+      operation: fetch_activities
+      params:
+        opportunity_id: $input.opportunity_id
+        limit: 50
+
+  - name: upcoming_events
+    description: Scheduled calendar events involving deal contacts
+    source:
+      tool: calendar
+      operation: fetch_upcoming_events
+      params:
+        contact_ids: $context.contacts[*].id
+---
+
+# Next Best Action
+
+You are an elite B2B sales strategist analyzing this opportunity to determine 
+the optimal next steps.
+
+## Current Deal
+
+{{opportunity}}
+
+## Stakeholders
+
+{{contacts}}
+
+## Recent Activity
+
+{{recent_activities}}
+
+## Upcoming Events
+
+{{upcoming_events}}
+
+## Strategic Analysis Framework
+
+Follow these steps in order:
+
+### Step 1: Identify Clear Next Steps
+Review the recent activities for any explicit next steps, commitments, 
+or follow-up requests...
+
+### Step 2: If No Clear Next Steps
+Analyze the full context using sales best practices to determine 
+the highest-impact action...
+
+...
+```
+
+A simpler function that receives data directly (no pre-fetching needed):
+
+```markdown
+---
 name: summarise-activity
-description: Summarize CRM activities into structured, actionable intelligence
+description: Summarize a CRM activity into structured, actionable intelligence
 model: gpt-5
 reasoning: high
 input: A raw CRM activity (email, call transcript, meeting notes)
@@ -310,9 +450,10 @@ Steps receive input through a mapping object. Values can reference:
 | Reference | Meaning |
 |---|---|
 | `$trigger.<field>` | Data from the event that started the process |
-| `$context.<field>` | Data from the host project's context (e.g., current user, organization) |
 | `$steps.<id>.output` | Output from a previously completed step |
 | Literal values | Static strings, numbers, booleans |
+
+Note: Functions handle their own data fetching via `context` declarations (see Section 3). Process steps only need to pass the **seed inputs** that functions need to start their context resolution (e.g., an opportunity ID). The function then auto-resolves its full context from tools.
 
 ### Example
 
@@ -330,9 +471,7 @@ steps:
   - id: deal-intel
     function: deal-intelligence
     input:
-      opportunity: $context.opportunity
-      contacts: $context.contacts
-      activities: $context.recentActivities
+      opportunity_id: $trigger.opportunity_id
 
 parallel:
   - group: contact-intelligence
@@ -340,27 +479,28 @@ parallel:
       - id: contact-intel
         function: contact-intelligence
         input:
-          contact: $trigger.contact
-          activities: $context.recentActivities
+          contact_id: $trigger.contact_id
+          opportunity_id: $trigger.opportunity_id
 
 branches:
-  - condition: $context.existingActions.length > 0
+  - condition: $steps.deal-intel.output.existing_actions_count > 0
     steps:
       - id: reevaluate
         function: evaluate-actions
         input:
-          context: $steps.deal-intel.output
-          existingActions: $context.existingActions
+          opportunity_id: $trigger.opportunity_id
         approval: required
 
-  - condition: $context.existingActions.length == 0
+  - condition: $steps.deal-intel.output.existing_actions_count == 0
     steps:
       - id: decide
         function: next-best-action
         input:
-          context: $steps.deal-intel.output
+          opportunity_id: $trigger.opportunity_id
         approval: required
 ```
+
+The process steps are lightweight because the heavy lifting (fetching contacts, activities, events, intelligence) is declared in each function's `context` field and resolved automatically by the framework.
 
 ---
 
