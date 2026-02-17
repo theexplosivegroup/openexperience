@@ -1,4 +1,4 @@
-# openexperience
+# Openexperience
 
 **Professional expertise for AI agents.**
 
@@ -6,26 +6,26 @@ openexperience is an open specification for packaging professional expertise -- 
 
 ## The Problem
 
-LLMs have knowledge, but not experience. They can write an email, but they don't know when to send it, who to CC, whether to use a case study or a pricing sheet, or that this prospect went quiet after the demo and needs a breakup sequence. That judgment comes from years of professional practice.
+LLMs have knowledge, but not experience. For instance, they can write a follow up email, but they don't know when to send it, why they should multi-thread in Sarah, or that this prospect intially mentioned a competitor in a first email, and that their persistent quiet might mean a deal risk and to use a battle card. That judgment comes from years of professional practice performing and training in a role.
 
-openexperience bridges that gap. It defines a standard way to capture professional expertise as portable, framework-agnostic packages that give AI agents the judgment of a seasoned professional.
+Openexperience bridges that gap. It defines a standard way to capture professional expertise as portable, framework-agnostic packages that give AI agents the judgment and workflows of a seasoned professional.
 
 ## What's in an Experience Package?
 
 An experience package is a directory of markdown and YAML files:
 
-| Component | Format | Purpose |
-|---|---|---|
-| **Manifest** | `experience.yaml` | Package metadata, dependencies, component listing |
-| **Functions** | `functions/*.md` | Individual capabilities (markdown instructions + YAML frontmatter) |
-| **Processes** | `processes/*.yaml` | Multi-step workflows that chain functions together |
-| **Actions** | `actions/*.yaml` | What the agent can DO (the output vocabulary) |
-| **Tools** | `tools/*.yaml` | Abstract interfaces to external systems |
-| **Schemas** | `schemas/*.yaml` | Data contracts the host must provide |
-| **Knowledge** | `knowledge/*.md` | Reference material (methodologies, frameworks, guidelines) |
-| **Persona** | `persona/` | Agent identity and behavioral rules |
 
-Only `experience.yaml`, `functions/`, `persona/`, and `README.md` are required. Everything else is opt-in based on what the expertise demands.
+| Component        | Format            | Purpose                                                            |
+| ---------------- | ----------------- | ------------------------------------------------------------------ |
+| **Manifest**     | `experience.yaml` | Package metadata, dependencies, component listing                  |
+| **Orchestrator** | `orchestrator.md` | Entry point. How the agent should use this experience.             |
+| **Persona**      | `persona/`        | Agent identity and behavioral rules                                |
+| **Functions**    | `functions/*.md`  | Individual capabilities (markdown instructions + YAML frontmatter) |
+| **Processes**    | `processes/*.md`  | Multi-step workflows of processes that map across multiple functions |
+| **Tools**        | `tools/*.yaml`    | Abstract interfaces to external systems                            |
+| **Knowledge**    | `knowledge/*.md`  | Reference material (methodologies, frameworks, guidelines)         |
+
+Only `experience.yaml`, `orchestrator.md`, `functions/`, `persona/`, and `README.md` are required. Everything else is opt-in based on what the expertise demands.
 
 ## How It Works
 
@@ -52,11 +52,13 @@ tools:
 ### 3. Your framework consumes the package
 
 The framework reads the package files and uses them at runtime:
+
+- **Orchestrator** tells the agent when/how to use this experience and which capabilities to reach for
 - **Persona** becomes the agent's system prompt
 - **Functions** become capabilities the agent can invoke
+- **Processes** orchestrate multi-step workflows (processes, decision heuristics etc) across functions
+- **Tools** declare what external systems the package needs to communicate with (e.g. CRM, email, calendar) you bind them to your implementations
 - **Knowledge** becomes reference material loaded into context
-- **Context declarations** tell the framework what data to fetch (from your bound tools) before each function runs
-- **Processes** orchestrate multi-step workflows across functions
 
 ### 4. The agent has professional judgment
 
@@ -76,8 +78,8 @@ This is the key design choice. An experience package is a **prompt engineering a
 To make your framework consume openexperience packages:
 
 1. **Parse `experience.yaml`** to discover components and requirements
-2. **Provide a tool binding mechanism** so users can map abstract tool names to concrete implementations
-3. **Implement context resolution** -- read function `context` declarations, call bound tools, inject results into `{{template}}` variables
+2. **Load `orchestrator.md`** into the agent's context so it knows when and how to use the experience
+3. **Provide a tool binding mechanism** so users can map abstract tool names to concrete implementations
 4. **Load persona and knowledge** into the agent's prompt
 5. **Optionally support processes** for multi-step orchestration
 
@@ -85,7 +87,7 @@ See the full [specification](spec.md) for details on each component type and the
 
 ## Specification
 
-The full specification is in [spec.md](spec.md). It covers every component type, their YAML schemas, and required vs. optional fields.
+The full specification is in [spec.md](spec.md).
 
 ## Example Packages
 
