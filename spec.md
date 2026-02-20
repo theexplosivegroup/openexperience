@@ -90,7 +90,11 @@ The manifest is the package index and metadata source.
 - `execution` (object): package-level process execution defaults inherited by all processes.
 - `delivery` (object): package-level output delivery defaults inherited by all processes.
 - `policy` (object): action governance rules declaring which tool operations require human approval.
-- `outputs` (array): primary deliverables this expert produces.
+- `outputs` (array of strings): human-readable list of primary deliverables this expert produces. Each entry is a short label (for example `"email drafts"`, `"pipeline summaries"`). These are descriptive metadata for indexing and documentation — they are not typed contracts. For typed output declarations, see process-level `outputs`.
+
+### `requires`
+
+`requires` currently defines one key: `tools`. Future spec versions may add additional dependency types (for example `knowledge_sources`, `credentials`). Frameworks should ignore unrecognized keys under `requires` and should not error on them.
 
 ### `requires.tools`
 
@@ -153,7 +157,13 @@ concurrency:
   - `escalate` (default): notify the main agent and user that the process failed and requires attention.
   - `abandon`: log the failure silently and drop the task. Use only for non-critical background tasks.
   - `dead_letter`: queue the failed invocation for manual review and reprocessing.
-- `resume_from_execution_log` (boolean): when `true`, the framework maintains an opaque execution log tracking which steps have completed, retry count, and failure details. On retry, the framework passes this context to the agent so it can resume from the last completed step rather than restarting from step 1. The execution log is framework-owned infrastructure — package authors never read or write it directly. It is separate from the process `scratchpad`, which is agent-owned working notes. Requires `idempotent: false`. Defaults to `true` when a scratchpad is declared on the process.
+- `resume_from_execution_log` (boolean): when `true`, the framework maintains an opaque execution log tracking which steps have completed, retry count, and failure details. On retry, the framework injects this context into the agent's prompt so the agent knows where it left off. Requires `idempotent: false`. Defaults to `false`.
+
+  The execution log and the process `scratchpad` serve different purposes and work together:
+  - **Execution log** (framework-owned): tracks step completion status, retry count, and failure metadata. The framework writes it; the agent never reads or writes it directly. The framework uses it to tell the agent "you completed steps 1–4, step 5 failed."
+  - **Scratchpad** (agent-owned): stores working data — intermediate results, CRM lookups, classification outputs — that the agent needs to resume meaningfully. The agent reads and writes it directly.
+
+  A process can use either mechanism independently, or both together. When both are present, the execution log tells the agent *where* to resume and the scratchpad provides the *working state* needed to continue.
 
 #### Why these defaults matter
 
@@ -182,7 +192,7 @@ execution:
 #### Delivery Fields
 
 - `format` (string): `narrative`, `structured`, or `both`. Defaults to `both`.
-- `channel` (string): output destination. `main` delivers to the primary agent session and chat channel. Defaults to `main`.
+- `channel` (string): output destination. `main` delivers to the primary agent session and chat channel. Defaults to `main`. Future spec versions or framework extensions may define additional channel types (for example `slack`, `email`). Frameworks should treat unrecognized channel values as an error at load time.
 - `sla_breach` (string): action when expected delivery SLA is exceeded. One of `warn` or `escalate`. Defaults to `warn`.
 
 #### Example
@@ -196,7 +206,7 @@ delivery:
 
 ### `policy`
 
-`policy` declares the governance rules for agent actions in this package. It defines which tool operations require human approval before executing, and what the default approval tier is for operations that do not declare their own.
+`policy` declares the governance rules for agent actions in this package. It defines which tool operations require human approval before executing, and what the default approval tier is for operations not explicitly listed in `overrides`.
 
 #### Approval Tiers
 
@@ -209,10 +219,20 @@ Every tool operation has an approval tier. There are three tiers:
 #### Policy Fields
 
 - `approval` (object):
-  - `default` (string): approval tier applied to all tool operations that do not declare their own. One of `auto`, `confirm`, `manual`. Defaults to `confirm` if omitted — requiring human approval is the safe default for any unknown operation.
+  - `default` (string): approval tier applied to all tool operations not listed in `overrides`. One of `auto`, `confirm`, `manual`. Defaults to `confirm` if omitted — requiring human approval is the safe default for any unknown operation.
   - `overrides` (object): per-operation tier overrides. Keys are `tool_name.operation_name`; values are `auto`, `confirm`, or `manual`. Use to tighten or relax the default for specific operations.
   - `timeout` (string): how long to wait for human approval on a `confirm` operation before timeout handling is applied (for example `24h`). Defaults to no timeout if omitted.
-  - `on_timeout` (string): action when an approval times out. One of `reject` (treat as rejected and follow process failure handling) or `escalate`. Defaults to `reject`.
+  - `on_timeout` (string): action when an approval times out. One of `reject` or `escalate`. Defaults to `reject`. When `reject`, the step is treated as a failed operation and the process follows its `execution.on_failure` policy (which may itself escalate, abandon, or dead-letter). When `escalate`, the framework immediately notifies the escalation channel without treating the step as a failure, giving the human a chance to approve late.
+
+#### Approval Tier Resolution Order
+
+When the framework needs the effective approval tier for a tool operation, it resolves in this order:
+
+1. **`policy.approval.overrides`** — if the operation has an explicit entry (for example `crm.create_note: auto`), use it.
+2. **`policy.approval.default`** — if no override exists, use the package-level default.
+3. **`confirm`** — if no `policy` block exists at all.
+
+The `approval` field on a tool operation declaration (in `tools/*.yaml`) is **documentation only**. It declares the natural risk level of the operation for human readers and tooling, but it does not participate in runtime resolution. The package `policy` block is the sole source of truth for runtime approval behavior. This avoids ambiguity when the same tool definition is shared across packages with different governance requirements.
 
 #### Why `confirm` is the safe default
 
@@ -269,17 +289,19 @@ Required:
 
 Optional:
 
-- `preset` (string): maps to a built-in runtime preset (for example `gmail` for the OpenClaw Gmail hook). When set, the framework uses its built-in handling for this event source.
+- `preset` (string): maps to a built-in runtime preset (for example `gmail` for the OpenClaw Gmail hook). When set, the framework uses its built-in handling for this event source. Presets are framework-defined — this spec does not maintain a registry of valid preset names. Framework documentation should list supported presets, describe the payload shape each preset provides (including any enrichment fields), and specify which `dedupe_key` and `concurrency_key` paths are available.
 - `requires_tool` (string): abstract tool name that provides this trigger when no preset covers it. The framework must resolve this tool before the trigger can be active.
 - `expr` (string): cron expression (5-field standard or 6-field with seconds). Required when `type` is `cron`.
 - `tz` (string): IANA timezone for the cron expression. Defaults to UTC.
 - `dedupe_key` (string): field path in the incoming payload used to identify duplicate events. The framework should skip processing if an event with the same key was already handled within a reasonable window.
-- `session` (string): `isolated` (default, recommended) or `main`. `isolated` runs each trigger invocation in its own session. `main` enqueues an event into the primary agent session.
+- `session` (string): `isolated` (default, recommended) or `main`. `isolated` creates a new, independent session for each trigger invocation — it has its own context window and ends when the process completes. `main` enqueues the event into the primary long-running agent session, which persists across interactions. For the purpose of state file `scope`, a "session" maps to a single isolated session or a single continuous main session. State files with `scope: session` reset at the start of each isolated session and when the main session is restarted.
 - `concurrency` (string): overrides the package-level `concurrency.default` for this trigger. One of:
   - `parallel`: each invocation runs immediately in its own session, with no coordination. Use for independent workloads such as processing multiple articles or documents at the same time.
   - `serial`: all invocations of this trigger queue globally and run one at a time. Use when overlap would cause duplicate work or corrupted output, such as a nightly report that must not run twice.
   - `serial_per_key`: invocations queue per a grouping key derived from the trigger payload. Invocations with the same key run in order; invocations with different keys run in parallel. Use for entity-scoped workflows such as a sales agent that must process emails for the same deal sequentially, while handling different deals concurrently.
 - `concurrency_key` (string): overrides the package-level `concurrency.key` for this trigger. Required when this trigger's effective concurrency mode is `serial_per_key` and no package-level key is set. A dot-notation path into the trigger payload identifying the grouping field (for example `contact_id`, `deal_id`, `thread_id`).
+
+  **Key resolution**: the `concurrency_key` path is resolved against the trigger payload *after* any enrichment the framework or preset performs. For example, a `gmail` preset may enrich the raw webhook payload with a `contact_id` derived from sender email before the concurrency key is evaluated. If the key path cannot be resolved for a given invocation, the framework should fall back to `serial` (global queue) for that invocation and emit a warning.
 - `payload_mapping` (object): maps trigger payload fields to process input names. Keys are process `inputs` names; values are dot-notation paths in the incoming payload.
 - `description` (string): human-readable explanation of when this trigger fires.
 
@@ -289,7 +311,7 @@ Optional:
 
 **`cron`** — fires on a schedule defined by `expr` and `tz`. Use this for proactive tasks: scanning for opportunities, generating daily summaries, sending follow-up reminders.
 
-**`channel`** — fires when a message arrives on a connected messaging channel (for example iMessage, WhatsApp, Telegram, Slack). The framework routes incoming channel messages to the process when the message matches the trigger's channel source.
+**`channel`** — fires when a message arrives on a connected messaging channel (for example iMessage, WhatsApp, Telegram, Slack). The framework routes incoming channel messages to the process when the message matches the trigger's channel source. The framework is responsible for normalizing channel payloads into a consistent shape. At minimum, channel payloads should include `sender_id`, `message_text`, and `channel_name` fields so that `payload_mapping` and `concurrency_key` can reference them portably.
 
 #### Example Triggers Block
 
@@ -371,6 +393,7 @@ requires:
   tools:
     - crm
     - email
+    - calendar
 
 # All triggers default to serial_per_key on contact_id.
 # The opportunity scan overrides to serial (global queue, no per-key needed).
@@ -456,6 +479,7 @@ components:
   tools:
     - tools/crm.yaml
     - tools/email.yaml
+    - tools/calendar.yaml
   knowledge:
     - knowledge/meddpicc.md
     - knowledge/competitive-battle-cards.md
@@ -638,11 +662,11 @@ Use markdown checkboxes for step tracking:
 
 This gives the agent explicit progress cues in agentic loops and is the mechanism by which the agent knows which steps are complete when resuming from a scratchpad.
 
-### Scratchpad Pattern (Required when `resume_from_execution_log: true`)
+### Scratchpad Pattern
 
 Processes that declare a `scratchpad` path must instruct the agent to write intermediate step results to that file as they complete. This enables:
 
-- **Resumption**: on retry, the agent reads the scratchpad and continues from the last completed step rather than restarting from step 1, preventing duplicate side-effects such as double CRM writes or duplicate email sends.
+- **Resumption**: on retry, the agent reads the scratchpad to recover working data (CRM lookups, classification results, draft content) and continues from the last completed step, preventing duplicate side-effects such as double CRM writes or duplicate email sends. This works independently of the framework execution log — the scratchpad provides domain-level working state, while the execution log (if enabled) provides step-completion metadata.
 - **Auditability**: every process run leaves a record of what happened and what was decided at each step.
 - **Context recovery**: if context is compacted or the session is interrupted, the scratchpad preserves the working state.
 
@@ -655,9 +679,11 @@ Frameworks may invoke any process in dry-run mode for testing and safety checks.
 In dry-run mode:
 
 - The agent narrates intended actions step-by-step.
-- `auto` read operations are allowed.
-- `confirm` and `manual` operations are not executed.
-- The process returns a planned execution report instead of side-effecting changes.
+- Tool operations at `auto` tier execute normally. By definition, `auto` operations have no external side-effects (reads, internal state updates), so they are safe to run.
+- Tool operations at `confirm` and `manual` tiers are **not executed**. The agent describes what it would do, including the operation name, inputs, and expected outcome.
+- The process returns a planned execution report instead of producing side-effecting changes.
+
+If a package author has incorrectly assigned `auto` to an operation with external side-effects, dry-run mode will not catch it. Frameworks may optionally cross-reference tool operation descriptions or add a `side_effects` flag to operations in future spec versions to improve dry-run safety.
 
 ### Example Process
 
@@ -738,7 +764,7 @@ Each operation includes:
 
 - `name` (string)
 - `description` (string)
-- `approval` (string): the natural approval tier for this operation. One of `auto`, `confirm`, or `manual`. Declaring this on the operation makes the risk level explicit and self-documenting, independent of the package-level policy. The package `policy.approval.overrides` can still override this value at runtime.
+- `approval` (string): the natural approval tier for this operation. One of `auto`, `confirm`, or `manual`. This field is **documentation only** — it makes the operation's risk level explicit and self-documenting for human readers and tooling. It does not affect runtime behavior. The effective approval tier at runtime is determined solely by the package `policy` block (see *Approval Tier Resolution Order* in section 3).
 - `input` (object shape using simple type declarations)
 - `output` (object shape using simple type declarations)
 
@@ -870,7 +896,7 @@ Examples:
 
 - `static`: stable references such as methodologies, templates, and playbooks.
 - `dynamic`: frequently updated material such as market updates or competitor research.
-- `private`: sensitive internal information that should not be surfaced in indexes or logs.
+- `private`: sensitive internal information. Frameworks must not include `private` knowledge in package indexes, public-facing summaries, debug logs, or API responses that leave the runtime boundary. `private` knowledge may still be loaded into agent context for use during function and process execution — the restriction applies to exposure outside the agent session, not to the agent itself.
 
 If omitted, `type` defaults to `static`.
 
@@ -945,7 +971,28 @@ Frameworks should:
 
 The framework should not impose a structure on state files. The builder's template is the contract.
 
-## 11. Consumption Model (Framework Authors)
+## 11. Scratch (`scratch/`)
+
+The `scratch/` directory holds runtime-generated working files created by process scratchpads. It is not committed to version control and is not listed in `components`.
+
+### Lifecycle
+
+- The `scratch/` directory is auto-created by the framework (or agent) at runtime when a process writes its first scratchpad file.
+- Scratch files are ephemeral by default. Frameworks should clean up scratch files after the associated process completes successfully.
+- On process failure with retry, scratch files are preserved so the agent can resume from them.
+- Frameworks may retain scratch files for a configurable retention period for debugging and auditing.
+
+### Format
+
+- Plain markdown.
+- No required frontmatter. The process that creates the file defines its structure.
+- File names should follow the pattern declared in the process `scratchpad` field (for example `triage-{message_id}.md`).
+
+### Relationship to State
+
+Scratch files are distinct from state files. State files are builder-designed, named, persistent storage with defined templates. Scratch files are ephemeral, process-scoped working notes that exist only for the duration of a single process invocation and its retries.
+
+## 12. Consumption Model (Framework Authors)
 
 This spec does not require a workflow engine. It defines portable artifacts that frameworks can map into their own agent runtime model.
 
@@ -970,7 +1017,38 @@ This spec does not require a workflow engine. It defines portable artifacts that
 - A consumer framework should preserve file semantics and intent.
 - Packages should remain valid without framework-specific code.
 
-## 12. Versioning
+## 13. Validation
+
+Frameworks should validate packages at load time and surface clear errors. The following rules define the minimum validation requirements.
+
+### Required Structure
+
+- `expert.yaml` must exist and contain all required fields (`spec`, `name`, `version`, `description`, `components`).
+- `orchestrator.md` must exist at the path declared in `components.orchestrator`.
+- At least one persona file must exist at a path listed in `components.persona`.
+- At least one function file must exist at a path listed in `components.functions`.
+
+### Cross-Reference Integrity
+
+- Every `triggers[].process` value must match the `name` field of a process listed in `components.processes`. Error if unresolved.
+- Every process `trigger` field (if present) must match a `triggers[].name` entry in the manifest. Warn if unresolved.
+- Every process `functions[]` entry should match the `name` field of a function listed in `components.functions`. Warn if unresolved.
+- Every function or process `tools[]` entry must appear in `requires.tools`. Error if a tool is referenced but not declared as a dependency.
+- Every function `knowledge[]` path should match a path listed in `components.knowledge`. Warn if unresolved.
+- Every `policy.approval.overrides` key should follow the format `tool_name.operation_name` and reference a tool in `requires.tools` and an operation declared in that tool's YAML file. Warn if unresolved.
+
+### File Existence
+
+- Every path listed in `components` must point to a file that exists in the package directory. Error if missing.
+
+### Severity Levels
+
+- **Error**: the package cannot be loaded. The framework must halt and report the issue.
+- **Warn**: the package can be loaded but may have issues at runtime. The framework should log the warning and continue.
+
+Frameworks may implement additional validation beyond these minimums.
+
+## 14. Versioning
 
 ### Spec Version
 

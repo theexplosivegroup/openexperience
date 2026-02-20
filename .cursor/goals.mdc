@@ -10,6 +10,7 @@ For example, an expoert package could turn a capable model such as Claude Opus 4
 3. an expert scientific researcher, who looks up research, cross references and looks for novel connections - documenting it's process in your preferred notetaking app.
 4. an expert legal advisor who examines your new situation in your legal duristiction, examines known precedents and draft contracts for you.
 5. a doctor who understands your medical history, stays up to date on research that might impact you, and keeps a running timeline of your medical issues.
+6. A customer support agent that receives support tickets, looks up company docs, does research and reports back to customer
 
 This repo is for THAT only.
 
