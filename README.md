@@ -40,6 +40,7 @@ An expert package is a directory of markdown and YAML files:
 | **Tools**        | `tools/*.yaml`    | Abstract interfaces to external systems                            |
 | **Knowledge**    | `knowledge/*.md`  | Reference material (methodologies, frameworks, guidelines)         |
 | **State**        | `state/*.md`      | Builder-defined local storage files the agent reads and writes     |
+| **Learnings**    | `learnings/*.md`  | Runtime-captured corrections and patterns that improve future runs |
 | **Scratch**      | `scratch/*.md`    | Runtime-generated working files for process resumption and audit   |
 
 Only `expert.yaml`, `orchestrator.md`, `functions/`, `persona/`, and `README.md` are required. Everything else is opt-in based on what the expertise demands.
@@ -77,6 +78,7 @@ The framework reads the package files and uses them at runtime:
 - **Tools** declare what external systems the package needs — you bind them to your implementations
 - **Knowledge** becomes reference material loaded into context
 - **State** becomes local read/write storage — the builder decides what files exist, what they track, and how the agent uses them
+- **Learnings** capture approved observations and corrections over time, then feed that scoped context back into future runs
 - **Triggers** (declared in the manifest) wire events to processes — a new email arrives, a cron fires, a message comes in on a channel — and the framework handles concurrency, retries, and delivery
 
 ### 4. The agent has professional judgment
@@ -98,15 +100,16 @@ This is the key design choice. An expert package is a **prompt engineering artif
 
 To make your framework consume openexperts packages:
 
-1. **Parse and validate `expert.yaml`** — discover components, verify required fields and cross-reference integrity (see [Validation](spec.md#13-validation))
+1. **Parse and validate `expert.yaml`** — discover components, verify required fields and cross-reference integrity (see [Validation](spec.md#14-validation))
 2. **Load orchestrator and persona** into the agent's persistent context
 3. **Bind abstract tools** to your concrete implementations (MCP servers, API clients, etc.)
 4. **Wire triggers** — map `webhook`, `cron`, and `channel` triggers to your runtime's event system, applying concurrency policy (`parallel`, `serial`, `serial_per_key`)
 5. **Enforce approval policy** — resolve the effective tier for each tool operation using the [resolution order](spec.md#approval-tier-resolution-order), handle `confirm` approval flow and `manual` draft delivery
 6. **Support execution guarantees** — timeouts, retries with backoff, scratchpad-based resumption, and failure escalation
-7. **Register functions and processes** as on-demand capabilities the agent can invoke
+7. **Support continuous learning** — capture proposed learnings, enforce learning approval, persist approved entries to `learnings/`, and inject scoped learnings into future function runs
+8. **Register functions and processes** as on-demand capabilities the agent can invoke
 
-See the full [specification](spec.md) for the complete runtime consumption model (section 12).
+See the full [specification](spec.md) for the complete runtime consumption model (section 13).
 
 ## Specification
 

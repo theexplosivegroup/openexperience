@@ -42,6 +42,9 @@ expert-package/
     *.md
   state/                # optional
     *.md
+  learnings/            # optional (runtime-generated, not committed)
+    _package.md
+    {function-name}.md
   scratch/              # runtime (auto-created, not committed)
     *.md
 ```
@@ -60,6 +63,7 @@ expert-package/
 - `tools/`
 - `knowledge/`
 - `state/`
+- `learnings/` (runtime-generated)
 - `scratch/` (runtime-generated)
 
 ### Naming Conventions
@@ -89,6 +93,7 @@ The manifest is the package index and metadata source.
 - `concurrency` (object): package-level concurrency defaults inherited by all triggers.
 - `execution` (object): package-level process execution defaults inherited by all processes.
 - `delivery` (object): package-level output delivery defaults inherited by all processes.
+- `learning` (object): continuous learning controls for capturing runtime observations and persisting approved learnings.
 - `policy` (object): action governance rules declaring which tool operations require human approval.
 - `outputs` (array of strings): human-readable list of primary deliverables this expert produces. Each entry is a short label (for example `"email drafts"`, `"pipeline summaries"`). These are descriptive metadata for indexing and documentation — they are not typed contracts. For typed output declarations, see process-level `outputs`.
 
@@ -202,6 +207,30 @@ delivery:
   format: both
   channel: main
   sla_breach: warn
+```
+
+### `learning`
+
+`learning` defines whether the package uses continuous learning and how proposed learnings are approved and persisted.
+
+#### Learning Fields
+
+- `enabled` (boolean): enables continuous learning for this package. Defaults to `false`.
+- `approval` (string): approval tier for persisting a proposed learning. One of `auto`, `confirm`, or `manual`. Defaults to `confirm`.
+- `max_entries_per_file` (integer): maximum number of approved entries stored in each learnings file before archival/pruning is applied by the framework. Defaults to `50`.
+
+When `enabled` is `true`, frameworks should support both package-wide and per-function learnings:
+
+- Package-wide learnings are stored in `learnings/_package.md`.
+- Function-scoped learnings are stored in `learnings/{function-name}.md`, where `{function-name}` matches the function frontmatter `name`.
+
+#### Example
+
+```yaml
+learning:
+  enabled: true
+  approval: confirm
+  max_entries_per_file: 50
 ```
 
 ### `policy`
@@ -1004,7 +1033,55 @@ The `scratch/` directory holds runtime-generated working files created by proces
 
 Scratch files are distinct from state files. State files are builder-designed, named, persistent storage with defined templates. Scratch files are ephemeral, process-scoped working notes that exist only for the duration of a single process invocation and its retries.
 
-## 12. Consumption Model (Framework Authors)
+## 12. Learnings (`learnings/`)
+
+The `learnings/` directory holds approved learnings captured from runtime execution, user feedback, and observed corrections. Learnings help the expert improve over time without modifying core package source files.
+
+### Scope and Files
+
+- `learnings/_package.md`: package-wide learnings that apply across functions and processes.
+- `learnings/{function-name}.md`: function-scoped learnings that apply only when that function runs.
+
+Files are created on demand when the first learning for that scope is approved.
+
+### Format
+
+Learnings files are markdown with optional frontmatter:
+
+```markdown
+---
+scope: classify-email-intent
+entry_count: 3
+---
+
+### Short emails from late-stage deals may indicate churn risk
+- **Date**: 2026-02-22
+- **Source**: process/inbound-email-triage, step 5
+- **Observation**: A two-word reply from a Stage 4 contact was classified as `other` with low urgency.
+- **Correction**: Classify this pattern as `churn_risk` with `high` urgency.
+- **Confidence**: high
+```
+
+Frameworks may use alternate entry templates, but each entry should preserve:
+
+- What happened (`Observation`)
+- What was learned (`Correction`)
+- Where it came from (`Source`)
+- A confidence signal (`Confidence`)
+
+### Learning Lifecycle
+
+1. **Observe**: the agent detects a correction opportunity, user feedback, or repeated pattern.
+2. **Propose**: the agent drafts a learning with explicit scope (`package` or function name).
+3. **Approve**: the framework enforces `learning.approval` (`auto`, `confirm`, `manual`).
+4. **Persist**: approved learnings are appended to the matching learnings file.
+5. **Apply**: the framework injects relevant learnings into future executions.
+
+### Relationship to Source Files
+
+Learnings are additive runtime context. They do not rewrite `functions/*.md`, `persona/*.md`, or `orchestrator.md`.
+
+## 13. Consumption Model (Framework Authors)
 
 This spec does not require a workflow engine. It defines portable artifacts that frameworks can map into their own agent runtime model.
 
@@ -1015,13 +1092,15 @@ This spec does not require a workflow engine. It defines portable artifacts that
 3. Register functions and processes as on-demand readable capabilities.
 4. Bind abstract tools to concrete integrations and verify `requires.tools` are satisfied.
 5. Initialize state templates at runtime locations; reset `scope: session` files between sessions.
-6. Apply package-level defaults (`concurrency`, `execution`, `delivery`, and `policy`) to all triggers and processes.
-7. Wire manifest triggers by type (`webhook`, `cron`, `channel`) and register their handlers.
-8. On trigger invocation, apply effective concurrency policy (`parallel`, `serial`, `serial_per_key`) and queue or start execution.
-9. Resolve process inputs using `payload_mapping` (or raw payload fallback), preload any declared `context` files, and run the process checklist.
-10. Enforce approval policy for each tool operation (`auto`, `confirm`, `manual`) including approval timeout behavior.
-11. On completion, deliver outputs using effective process `delivery` settings and emit escalation notifications when configured.
-12. On failure or low confidence, apply `execution.retry`, `resume_from_execution_log`, `on_failure`, and `policy.escalation` rules.
+6. Initialize learnings storage when `learning.enabled` is `true` (create `learnings/` on demand, enforce per-file limits, and support approval flow for proposed entries).
+7. Apply package-level defaults (`concurrency`, `execution`, `delivery`, and `policy`) to all triggers and processes.
+8. Wire manifest triggers by type (`webhook`, `cron`, `channel`) and register their handlers.
+9. On trigger invocation, apply effective concurrency policy (`parallel`, `serial`, `serial_per_key`) and queue or start execution.
+10. Resolve process inputs using `payload_mapping` (or raw payload fallback), preload any declared `context` files, and run the process checklist.
+11. Before invoking a function, inject relevant learnings (`learnings/_package.md` plus `learnings/{function-name}.md` when present).
+12. Enforce approval policy for each tool operation (`auto`, `confirm`, `manual`) including approval timeout behavior, and enforce learning approval policy for proposed learnings.
+13. On completion, deliver outputs using effective process `delivery` settings and emit escalation notifications when configured.
+14. On failure or low confidence, apply `execution.retry`, `resume_from_execution_log`, `on_failure`, and `policy.escalation` rules.
 
 ### Portability Rules
 
@@ -1029,7 +1108,7 @@ This spec does not require a workflow engine. It defines portable artifacts that
 - A consumer framework should preserve file semantics and intent.
 - Packages should remain valid without framework-specific code.
 
-## 13. Validation
+## 14. Validation
 
 Frameworks should validate packages at load time and surface clear errors. The following rules define the minimum validation requirements.
 
@@ -1053,6 +1132,13 @@ Frameworks should validate packages at load time and surface clear errors. The f
 
 - Every path listed in `components` must point to a file that exists in the package directory. Error if missing.
 
+### Learning System
+
+- If `learning.enabled` is `true`, the framework should ensure the package runtime has writable learnings storage.
+- Learnings files are runtime-generated and should not be required in `components`.
+- If a learnings file declares `scope`, the value should be `package` or match a function `name` declared in `components.functions`. Warn if unresolved.
+- `learning.approval` must be one of `auto`, `confirm`, or `manual`. Error if invalid.
+
 ### Severity Levels
 
 - **Error**: the package cannot be loaded. The framework must halt and report the issue.
@@ -1060,7 +1146,7 @@ Frameworks should validate packages at load time and surface clear errors. The f
 
 Frameworks may implement additional validation beyond these minimums.
 
-## 14. Versioning
+## 15. Versioning
 
 ### Spec Version
 
